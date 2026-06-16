@@ -1,28 +1,25 @@
 # Vellum DOCX Maker
 
-Generate a Vellum-ready manuscript DOCX from the prepared Seneca edition in this folder.
+Convert Markdown manuscripts into Vellum-friendly DOCX files.
 
-The script builds a single print/import manuscript with:
+The script is opinionated for long-form manuscripts:
 
-- Part 1: English
-- Part 2: Latin
-- Chapter 1 to 6 as real `Heading 1` breaks
-- `Heading 2` available for subheads
-- Verse passages preserved as indented, italic blocks
-- No title page or TOC inside the manuscript
+- the first `#` line becomes a centered title line
+- `##` starts a new chapter by default
+- `###` and deeper become subheads
+- Blockquotes become indented italic paragraphs
+- Bullets and numbered items become real Word lists
+- Fenced code blocks become monospaced blocks
+- Page breaks are inserted before each new chapter after the first
 
-## What it uses
-
-- `build_vellum_docx.py` reads the finished bilingual HTML edition in this directory
-- It emits `seneca-on-providence-vellum.docx`
-- The DOCX is intended for Vellum import and ordinary print workflows
-
-## Build
+## Usage
 
 ```bash
-python3 build_vellum_docx.py
+python3 build_vellum_docx.py input.md -o output.docx --title "Book Title" --author "Author Name"
 ```
 
-## Notes
+You can pass more than one Markdown file, and the script will append them in order.
 
-This repo is intentionally small. The script is the deliverable; the surrounding files are the source edition and QA artifacts used to produce it.
+## Output
+
+The generated DOCX is meant for Vellum import and print production. Keep the Markdown structurally clean: use headings for sections, avoid decorative layout, and let the manuscript carry the structure.

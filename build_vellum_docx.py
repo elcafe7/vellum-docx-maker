@@ -1,45 +1,66 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import re
 from pathlib import Path
 
-from lxml import html
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches, Pt
 
 
-ROOT = Path(__file__).resolve().parent
-TITLE = "Seneca: On Providence"
-AUTHOR = "Seneca"
-TRANSLATOR = "Aubrey Stewart"
+DEFAULT_TITLE = "Manuscript"
+DEFAULT_AUTHOR = ""
+DEFAULT_OUTPUT = "vellum-ready.docx"
+
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+ORDERED_RE = re.compile(r"^\s*\d+\.\s+")
+UNORDERED_RE = re.compile(r"^\s*[-*+]\s+")
+FENCE_RE = re.compile(r"^\s*```")
+HR_RE = re.compile(r"^\s*(?:---|\*\*\*|___)\s*$")
+INLINE_RE = re.compile(r"(\*\*\*.+?\*\*\*|\*\*.+?\*\*|\*.+?\*|`.+?`)")
 
 
-def load_volume(article):
-    label = article.get("data-volume")
-    lang = article.get("lang")
-    title = article.xpath('.//header[contains(@class, "volume-header")]//h2/text()')
-    title = title[0].strip() if title else ""
-    sections = []
-    for section in article.xpath('./section[contains(@class, "chapter")]'):
-        roman = section.xpath('.//div[contains(@class, "chapter-mark")]//strong/text()')
-        roman = roman[0].strip() if roman else ""
-        blocks = []
-        body = section.xpath('.//div[contains(@class, "chapter-body")]')
-        if body:
-            for node in body[0]:
-                tag = node.tag.lower() if isinstance(node.tag, str) else ""
-                if tag == "p":
-                    text = node.text_content().strip()
-                    if text:
-                        blocks.append(("p", text))
-                elif tag == "blockquote":
-                    verse_lines = [line.strip() for line in node.text_content().splitlines() if line.strip()]
-                    if verse_lines:
-                        blocks.append(("v", verse_lines))
-        sections.append({"roman": roman, "blocks": blocks})
-    return {"number": label, "lang": lang, "title": title, "sections": sections}
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Convert Markdown manuscripts into Vellum-friendly DOCX files."
+    )
+    parser.add_argument("inputs", nargs="+", help="Markdown input file(s)")
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=DEFAULT_OUTPUT,
+        help=f"Output DOCX path (default: {DEFAULT_OUTPUT})",
+    )
+    parser.add_argument(
+        "--title",
+        default=DEFAULT_TITLE,
+        help="Document title stored in metadata (default: Manuscript)",
+    )
+    parser.add_argument(
+        "--author",
+        default=DEFAULT_AUTHOR,
+        help="Document author stored in metadata",
+    )
+    parser.add_argument(
+        "--chapter-level",
+        type=int,
+        default=2,
+        choices=range(1, 7),
+        metavar="N",
+        help="Markdown heading level that starts a new chapter (default: 2 for ##)",
+    )
+    return parser.parse_args()
 
 
-def add_title_style(doc: Document):
+def configure_document(doc: Document, title: str, author: str):
+    props = doc.core_properties
+    props.title = title
+    props.author = author
+    props.subject = "Vellum-friendly Markdown manuscript"
+    props.keywords = "Vellum, DOCX, Markdown, manuscript"
+
     styles = doc.styles
     normal = styles["Normal"]
     normal.font.name = "Georgia"
@@ -47,7 +68,7 @@ def add_title_style(doc: Document):
     normal.paragraph_format.space_after = Pt(6)
     normal.paragraph_format.line_spacing = 1.25
 
-    for name in ("Heading 1", "Heading 2"):
+    for name in ("Heading 1", "Heading 2", "Heading 3", "Heading 4", "Heading 5", "Heading 6"):
         style = styles[name]
         style.font.name = "Georgia"
 
@@ -64,60 +85,203 @@ def add_title_style(doc: Document):
     h2.paragraph_format.space_after = Pt(4)
 
 
-def add_metadata(doc: Document):
-    props = doc.core_properties
-    props.title = TITLE
-    props.author = AUTHOR
-    props.subject = "English and Latin manuscript prepared for Vellum import"
-    props.comments = f"Volume 1 English translation by {TRANSLATOR}; Volume 2 Latin text."
-    props.keywords = "Vellum, DOCX, Seneca, De Providentia, English, Latin"
+def add_inline_runs(paragraph, text: str):
+    pos = 0
+    for match in INLINE_RE.finditer(text):
+        if match.start() > pos:
+            paragraph.add_run(text[pos:match.start()])
+        token = match.group(0)
+        if token.startswith("```"):
+            run = paragraph.add_run(token[3:-3])
+            run.font.name = "Courier New"
+        elif token.startswith("***"):
+            run = paragraph.add_run(token[3:-3])
+            run.bold = True
+            run.italic = True
+        elif token.startswith("**"):
+            run = paragraph.add_run(token[2:-2])
+            run.bold = True
+        elif token.startswith("*"):
+            run = paragraph.add_run(token[1:-1])
+            run.italic = True
+        elif token.startswith("`"):
+            run = paragraph.add_run(token[1:-1])
+            run.font.name = "Courier New"
+        pos = match.end()
+    if pos < len(text):
+        paragraph.add_run(text[pos:])
 
 
-def add_part(doc: Document, title: str):
-    p = doc.add_paragraph(style="Heading 1")
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p.add_run(title)
-
-
-def add_chapter(doc: Document, title: str):
-    p = doc.add_paragraph(style="Heading 1")
-    p.add_run(title)
-
-
-def add_body_paragraph(doc: Document, text: str):
+def flush_paragraph(doc: Document, buffer: list[str]):
+    text = " ".join(part.strip() for part in buffer).strip()
+    buffer.clear()
+    if not text:
+        return
     p = doc.add_paragraph(style="Normal")
-    # Preserve typographic quotes and em dashes from the source, but keep the
-    # manuscript structurally plain for Vellum.
-    p.add_run(text)
+    add_inline_runs(p, text)
 
 
-def add_verse_block(doc: Document, lines):
-    for idx, line in enumerate(lines):
+def add_quote(doc: Document, lines: list[str]):
+    text = " ".join(line.strip() for line in lines).strip()
+    if not text:
+        return
+    p = doc.add_paragraph(style="Normal")
+    p.paragraph_format.left_indent = Inches(0.6)
+    p.paragraph_format.right_indent = Inches(0.6)
+    p.paragraph_format.space_after = Pt(4)
+    add_inline_runs(p, text)
+    if p.runs:
+        for run in p.runs:
+            run.italic = True
+
+
+def add_code_block(doc: Document, lines: list[str]):
+    if not lines:
+        return
+    for line in lines:
         p = doc.add_paragraph(style="Normal")
-        p.paragraph_format.left_indent = Inches(0.6)
-        p.paragraph_format.right_indent = Inches(0.6)
+        p.paragraph_format.left_indent = Inches(0.4)
+        p.paragraph_format.right_indent = Inches(0.4)
         p.paragraph_format.space_after = Pt(0)
-        r = p.add_run(line)
-        r.italic = True
-        if idx < len(lines) - 1:
-            r.add_break()
+        run = p.add_run(line.rstrip())
+        run.font.name = "Courier New"
 
 
-def build_volume(doc: Document, volume):
-    add_part(doc, f"Part {volume['number']}: {volume['title']}")
-    for idx, section in enumerate(volume["sections"], start=1):
-        add_chapter(doc, f"Chapter {idx}: {section['roman']}")
-        for kind, value in section["blocks"]:
-            if kind == "p":
-                add_body_paragraph(doc, value)
+def add_list_item(doc: Document, text: str, ordered: bool, level: int = 0):
+    style = "List Number" if ordered else "List Bullet"
+    p = doc.add_paragraph(style=style)
+    if level:
+        p.paragraph_format.left_indent = Inches(0.3 * level)
+    add_inline_runs(p, text)
+
+
+def add_heading(doc: Document, level: int, text: str, chapter_level: int, seen_chapter: bool):
+    if level >= chapter_level:
+        if seen_chapter:
+            doc.add_page_break()
+        p = doc.add_paragraph(style=f"Heading {min(level - chapter_level + 1, 6)}")
+        p.add_run(text)
+        return True
+
+    if level == 1:
+        p = doc.add_paragraph(style="Heading 1")
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.add_run(text)
+    else:
+        style_name = f"Heading {min(level + 1, 6)}"
+        p = doc.add_paragraph(style=style_name)
+        p.add_run(text)
+    return seen_chapter
+
+
+def process_markdown(doc: Document, path: Path, chapter_level: int, first_file: bool, seen_chapter: bool):
+    if not first_file:
+        doc.add_page_break()
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    paragraph_buffer: list[str] = []
+    quote_buffer: list[str] = []
+    code_buffer: list[str] = []
+    list_buffer: list[str] = []
+    list_ordered = False
+    in_code = False
+
+    def flush_all():
+        nonlocal quote_buffer, code_buffer, list_buffer, list_ordered
+        flush_paragraph(doc, paragraph_buffer)
+        if quote_buffer:
+            add_quote(doc, quote_buffer)
+            quote_buffer = []
+        if code_buffer:
+            add_code_block(doc, code_buffer)
+            code_buffer = []
+        if list_buffer:
+            for item in list_buffer:
+                add_list_item(doc, item, list_ordered)
+            list_buffer = []
+
+    for raw in lines:
+        line = raw.rstrip()
+
+        if FENCE_RE.match(line):
+            flush_paragraph(doc, paragraph_buffer)
+            if in_code:
+                add_code_block(doc, code_buffer)
+                code_buffer = []
+                in_code = False
             else:
-                add_verse_block(doc, value)
+                if quote_buffer:
+                    add_quote(doc, quote_buffer)
+                    quote_buffer = []
+                if list_buffer:
+                    for item in list_buffer:
+                        add_list_item(doc, item, list_ordered)
+                    list_buffer = []
+                in_code = True
+            continue
+
+        if in_code:
+            code_buffer.append(line)
+            continue
+
+        if not line.strip():
+            flush_all()
+            continue
+
+        heading = HEADING_RE.match(line)
+        if heading:
+            flush_all()
+            hashes, text = heading.groups()
+            seen_chapter = add_heading(doc, len(hashes), text.strip(), chapter_level, seen_chapter)
+            continue
+
+        if HR_RE.match(line):
+            flush_all()
+            doc.add_paragraph(" ", style="Normal")
+            continue
+
+        if line.lstrip().startswith(">"):
+            flush_paragraph(doc, paragraph_buffer)
+            if list_buffer:
+                for item in list_buffer:
+                    add_list_item(doc, item, list_ordered)
+                list_buffer = []
+            quote_buffer.append(line.lstrip()[1:].lstrip())
+            continue
+
+        unordered = UNORDERED_RE.match(line)
+        ordered = ORDERED_RE.match(line)
+        if unordered or ordered:
+            flush_paragraph(doc, paragraph_buffer)
+            if quote_buffer:
+                add_quote(doc, quote_buffer)
+                quote_buffer = []
+            if not list_buffer:
+                list_ordered = bool(ordered)
+            else:
+                list_ordered = list_ordered and bool(ordered)
+            item = re.sub(r"^\s*(?:[-*+]|\d+\.)\s+", "", line).strip()
+            list_buffer.append(item)
+            continue
+
+        if quote_buffer:
+            add_quote(doc, quote_buffer)
+            quote_buffer = []
+        if list_buffer:
+            for item in list_buffer:
+                add_list_item(doc, item, list_ordered)
+            list_buffer = []
+        paragraph_buffer.append(line)
+
+    flush_all()
+
+    return seen_chapter
 
 
 def main():
+    args = parse_args()
     doc = Document()
-    add_title_style(doc)
-    add_metadata(doc)
+    configure_document(doc, args.title, args.author)
 
     section = doc.sections[0]
     section.top_margin = Inches(0.85)
@@ -125,11 +289,17 @@ def main():
     section.left_margin = Inches(0.95)
     section.right_margin = Inches(0.95)
 
-    tree = html.parse(str(ROOT / "seneca-on-providence.html"))
-    for article in tree.xpath('//article[contains(@class, "volume")]'):
-        build_volume(doc, load_volume(article))
+    seen_chapter = False
+    for index, md in enumerate(args.inputs):
+        seen_chapter = process_markdown(
+            doc,
+            Path(md),
+            args.chapter_level,
+            first_file=index == 0,
+            seen_chapter=seen_chapter,
+        )
 
-    out = ROOT / "seneca-on-providence-vellum.docx"
+    out = Path(args.output)
     doc.save(out)
     print(out)
 
